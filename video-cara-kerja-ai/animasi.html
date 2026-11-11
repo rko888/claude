@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Cara Kerja AI</title>
+<style>
+  html,body{margin:0;background:#0b1022;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+// Animasi deterministik: render(t) menggambar frame pada detik ke-t.
+// Bisa diputar langsung di browser, atau direkam frame-per-frame oleh render.js.
+const W = 1280, H = 720;
+const c = document.getElementById('c');
+const x = c.getContext('2d');
+const FONT = 'Inter, "DejaVu Sans", sans-serif';
+const MONO = '"DejaVu Sans Mono", monospace';
+
+const C = {
+  cyan: '#38bdf8', violet: '#a78bfa', amber: '#fbbf24',
+  green: '#34d399', pink: '#f472b6', text: '#f1f5f9', muted: '#cbd5e1', dim: '#64748b'
+};
+
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const eo = t => 1 - Math.pow(1 - t, 3);
+const eio = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const back = t => { const k = 1.70158; return 1 + (k + 1) * Math.pow(t - 1, 3) + k * Math.pow(t - 1, 2); };
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+function rng(s) { return () => { s = (s * 1664525 + 1013904223) % 4294967296; return s / 4294967296; }; }
+
+function txt(s, px, py, size, color, weight = 600, align = 'center', font = FONT) {
+  x.font = `${weight} ${size}px ${font}`;
+  x.fillStyle = color; x.textAlign = align; x.textBaseline = 'alphabetic';
+  x.fillText(s, px, py);
+}
+function rr(px, py, w, h, r) { x.beginPath(); x.roundRect(px, py, w, h, r); }
+function circle(px, py, r) { x.beginPath(); x.arc(px, py, r, 0, Math.PI * 2); }
+function withAlpha(a, fn) { x.save(); x.globalAlpha *= clamp(a); fn(); x.restore(); }
+
+function wrap(s, maxW, size) {
+  x.font = `500 ${size}px ${FONT}`;
+  const words = s.split(' '); const lines = []; let cur = '';
+  for (const w of words) {
+    const test = cur ? cur + ' ' + w : w;
+    if (x.measureText(test).width > maxW && cur) { lines.push(cur); cur = w; } else cur = test;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function header(n, title, lt) {
+  const a = eo(prog(lt, 0, .8));
+  withAlpha(a, () => {
+    x.save(); x.translate(0, (1 - a) * -16);
+    const label = 'LANGKAH ' + n;
+    x.font = `700 15px ${FONT}`;
+    const w = x.measureText(label).width + 30;
+    rr(W / 2 - w / 2, 40, w, 30, 15); x.fillStyle = 'rgba(56,189,248,.15)'; x.fill();
+    txt(label, W / 2, 61, 15, C.cyan, 700);
+    txt(title, W / 2, 116, 40, C.text, 800);
+    x.restore();
+  });
+}
+
+function caption(s, lt, delay = 1) {
+  const a = eo(prog(lt, delay, delay + .8));
+  const lines = wrap(s, 1000, 23);
+  withAlpha(a, () => {
+    const y0 = 640 - (lines.length - 1) * 17 + (1 - a) * 10;
+    lines.forEach((l, i) => txt(l, W / 2, y0 + i * 34, 23, C.muted, 500));
+  });
+}
+
+function arrow(x1, y1, x2, y2, color, w = 2) {
+  x.strokeStyle = color; x.fillStyle = color; x.lineWidth = w;
+  x.beginPath(); x.moveTo(x1, y1); x.lineTo(x2, y2); x.stroke();
+  const ang = Math.atan2(y2 - y1, x2 - x1);
+  x.beginPath(); x.moveTo(x2, y2);
+  x.lineTo(x2 - 10 * Math.cos(ang - .45), y2 - 10 * Math.sin(ang - .45));
+  x.lineTo(x2 - 10 * Math.cos(ang + .45), y2 - 10 * Math.sin(ang + .45));
+  x.closePath(); x.fill();
+}
+
+// ---------- Latar ----------
+function background(t) {
+  const g = x.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, '#0a0f24'); g.addColorStop(1, '#161b40');
+  x.fillStyle = g; x.fillRect(0, 0, W, H);
+  // cahaya lembut yang bergerak pelan
+  const gx = W / 2 + Math.sin(t * .2) * 300, gy = H / 2 + Math.cos(t * .17) * 120;
+  const rg = x.createRadialGradient(gx, gy, 0, gx, gy, 600);
+  rg.addColorStop(0, 'rgba(124,58,237,.16)'); rg.addColorStop(1, 'rgba(124,58,237,0)');
+  x.fillStyle = rg; x.fillRect(0, 0, W, H);
+  x.fillStyle = 'rgba(148,163,255,.07)';
+  for (let i = 20; i < W; i += 40) for (let j = 20; j < H; j += 40) x.fillRect(i, j, 2, 2);
+}
+
+// ---------- Adegan 1: Judul ----------
+const titleNodes = (() => { const r = rng(7); return Array.from({ length: 26 }, () => ({ x: r() * W, y: r() * H, p: r() * 6 })); })();
+function sceneTitle(lt, d) {
+  // jaringan titik samar di latar
+  x.lineWidth = 1;
+  for (let i = 0; i < titleNodes.length; i++) for (let j = i + 1; j < titleNodes.length; j++) {
+    const a = titleNodes[i], b = titleNodes[j];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    if (dist < 230) { x.strokeStyle = `rgba(167,139,250,${.18 * (1 - dist / 230)})`; x.beginPath(); x.moveTo(a.x, a.y); x.lineTo(b.x, b.y); x.stroke(); }
+  }
+  for (const n of titleNodes) {
+    const pulse = .5 + .5 * Math.sin(lt * 2 + n.p);
+    circle(n.x, n.y, 3 + pulse * 2); x.fillStyle = `rgba(56,189,248,${.3 + pulse * .4})`; x.fill();
+  }
+  const a = back(prog(lt, .3, 1.3));
+  withAlpha(prog(lt, .3, 1), () => {
+    x.save(); x.translate(W / 2, 330); x.scale(.85 + .15 * a, .85 + .15 * a);
+    x.shadowColor = 'rgba(56,189,248,.6)'; x.shadowBlur = 30;
+    txt('Bagaimana AI Bekerja?', 0, 0, 72, C.text, 800);
+    x.restore();
+  });
+  withAlpha(eo(prog(lt, 1.4, 2.2)), () => txt('Penjelasan sederhana dalam 5 langkah', W / 2, 400, 28, C.cyan, 500));
+  withAlpha(eo(prog(lt, 1.4, 2.2)), () => {
+    const w = 260 * eo(prog(lt, 1.4, 2.4));
+    const g = x.createLinearGradient(W / 2 - w / 2, 0, W / 2 + w / 2, 0);
+    g.addColorStop(0, C.cyan); g.addColorStop(1, C.violet);
+    x.fillStyle = g; x.fillRect(W / 2 - w / 2, 430, w, 4);
+  });
+}
+
+// ---------- Adegan 2: Data ----------
+const dataItems = (() => { const r = rng(42); return Array.from({ length: 36 }, (_, i) => ({ type: i % 3, x: 80 + r() * 380, y: 240 + r() * 290, rot: (r() - .5) * .5 })); })();
+function drawItem(type, s) {
+  const col = [C.cyan, C.amber, C.pink][type];
+  rr(-28, -28, 56, 56, 10); x.fillStyle = 'rgba(255,255,255,.07)'; x.fill();
+  x.strokeStyle = col; x.lineWidth = 2; x.stroke();
+  x.fillStyle = col; x.strokeStyle = col;
+  if (type === 0) { for (let i = 0; i < 4; i++) x.fillRect(-16, -14 + i * 8, i === 3 ? 18 : 32, 3); }
+  else if (type === 1) {
+    circle(10, -10, 5); x.fill();
+    x.beginPath(); x.moveTo(-18, 16); x.lineTo(-4, -4); x.lineTo(6, 8); x.lineTo(12, 2); x.lineTo(20, 16); x.closePath(); x.fill();
+  } else { const hs = [8, 18, 12, 22, 10, 16]; hs.forEach((h, i) => x.fillRect(-17 + i * 6, -h / 2, 3, h)); }
+}
+function sceneData(lt, d) {
+  header(1, 'Belajar dari Data', lt);
+  const bx = 920, by = 360;
+  const arrived = dataItems.filter((_, i) => lt > 2.2 + i * .13 + 1.1).length;
+  // kotak model
+  const pulse = arrived > 0 ? .5 + .5 * Math.sin(lt * 8) : 0;
+  withAlpha(eo(prog(lt, .4, 1.2)), () => {
+    x.save(); x.shadowColor = C.violet; x.shadowBlur = 20 + pulse * 25;
+    rr(bx - 110, by - 110, 220, 220, 28);
+    const g = x.createLinearGradient(bx - 110, by - 110, bx + 110, by + 110);
+    g.addColorStop(0, '#6d28d9'); g.addColorStop(1, '#312e81');
+    x.fillStyle = g; x.fill(); x.restore();
+    // "otak" dari titik-titik di dalam kotak
+    const r = rng(3);
+    for (let i = 0; i < 18; i++) {
+      const px = bx - 70 + r() * 140, py = by - 75 + r() * 110;
+      circle(px, py, 3); x.fillStyle = `rgba(255,255,255,${.3 + .5 * (Math.sin(lt * 3 + i) * .5 + .5) * Math.min(1, arrived / 10)})`; x.fill();
+    }
+    txt('Model AI', bx, by + 75, 26, C.text, 700);
+    const n = Math.floor(eio(prog(lt, 2.2, 7.4)) * 1200000000);
+    txt(n.toLocaleString('id-ID'), bx, by + 160, 30, C.amber, 800, 'center', MONO);
+    txt('contoh telah dipelajari', bx, by + 190, 18, C.muted, 500);
+  });
+  // legenda
+  withAlpha(eo(prog(lt, .6, 1.4)), () => {
+    [['Teks', C.cyan], ['Gambar', C.amber], ['Suara', C.pink]].forEach(([l, col], i) => {
+      circle(110 + i * 130, 168, 6); x.fillStyle = col; x.fill();
+      txt(l, 124 + i * 130, 174, 18, C.muted, 600, 'left');
+    });
+  });
+  dataItems.forEach((it, i) => {
+    const appear = back(prog(lt, .4 + i * .035, .9 + i * .035));
+    const fs = 2.2 + i * .13, f = eio(prog(lt, fs, fs + 1.1));
+    if (f >= 1) return;
+    const cx = lerp(lerp(it.x, (it.x + bx) / 2, f), lerp((it.x + bx) / 2, bx, f), f);
+    const cy = lerp(lerp(it.y, it.y - 90, f), lerp(it.y - 90, by, f), f);
+    const s = appear * (1 - f * .7);
+    x.save(); x.translate(cx, cy); x.rotate(it.rot * (1 - f)); x.scale(s, s);
+    x.globalAlpha *= clamp(appear) * (1 - f * .6);
+    drawItem(it.type, s); x.restore();
+  });
+  caption('AI dilatih dengan sangat banyak contoh — teks, gambar, dan suara — agar bisa menemukan pola di dalamnya.', lt, 1.2);
+}
+
+// ---------- Adegan 3: Token & angka ----------
+const words = ['Kucing', 'suka', 'makan', 'ikan'];
+const wcol = [C.cyan, C.violet, C.amber, C.green];
+const vecs = [[0.21, -0.83, 0.47, 0.05], [-0.52, 0.14, 0.90, -0.31], [0.66, 0.38, -0.12, 0.74], [-0.09, -0.61, 0.28, 0.93]];
+const tokIds = [4821, 912, 3307, 2766];
+function sceneTokens(lt, d) {
+  header(2, 'Mengubah Kata Menjadi Angka', lt);
+  x.font = `700 46px ${FONT}`;
+  const space = x.measureText(' ').width;
+  const ws = words.map(w => x.measureText(w).width);
+  const total = ws.reduce((a, b) => a + b, 0) + space * 3;
+  let cur = W / 2 - total / 2;
+  const start = ws.map(w => { const cx = cur + w / 2; cur += w + space; return cx; });
+  const split = eio(prog(lt, 2.2, 3.2));
+  const chipA = eo(prog(lt, 2.6, 3.4));
+  withAlpha(eo(prog(lt, .5, 1.3)), () => {
+    words.forEach((w, i) => {
+      const fx = W / 2 + (i - 1.5) * 260;
+      const cx = lerp(start[i], fx, split), cy = 245;
+      withAlpha(chipA, () => {
+        const cw = ws[i] + 40;
+        rr(cx - cw / 2, cy - 44, cw, 62, 16);
+        x.fillStyle = wcol[i] + '26'; x.fill(); x.strokeStyle = wcol[i]; x.lineWidth = 2; x.stroke();
+      });
+      txt(w, cx, cy, 46, lerp(0, 1, chipA) > .5 ? wcol[i] : C.text, 700);
+    });
+  });
+  withAlpha(eo(prog(lt, 2.6, 3.2)), () => txt('token', W / 2 - 1.5 * 260 - 120, 238, 16, C.dim, 600, 'right'));
+  words.forEach((w, i) => {
+    const fx = W / 2 + (i - 1.5) * 260;
+    const base = 3.6 + i * .35;
+    withAlpha(eo(prog(lt, base, base + .5)), () => {
+      txt('ID ' + tokIds[i], fx, 300, 16, C.dim, 600, 'center', MONO);
+      arrow(fx, 310, fx, 340, wcol[i]);
+      rr(fx - 70, 350, 140, 205, 14);
+      x.fillStyle = 'rgba(255,255,255,.05)'; x.fill(); x.strokeStyle = 'rgba(255,255,255,.15)'; x.lineWidth = 1; x.stroke();
+    });
+    vecs[i].forEach((v, k) => {
+      const a = eo(prog(lt, base + .3 + k * .18, base + .6 + k * .18));
+      withAlpha(a, () => txt((v >= 0 ? ' ' : '') + v.toFixed(2), fx, 388 + k * 38, 24, wcol[i], 700, 'center', MONO));
+    });
+    withAlpha(eo(prog(lt, base + 1.2, base + 1.6)), () => txt('⋮', fx, 545, 22, C.dim, 700));
+  });
+  caption('Komputer hanya mengerti angka. Kalimat dipecah menjadi token, lalu setiap token diubah menjadi deretan angka yang menyimpan maknanya.', lt, 1.4);
+}
+
+// ---------- Adegan 4: Jaringan saraf ----------
+const layers = [4, 6, 6, 3];
+const LX = [250, 510, 770, 1030];
+const nodePos = layers.map((n, l) => Array.from({ length: n }, (_, i) => ({ x: LX[l], y: 365 + (i - (n - 1) / 2) * 60 })));
+const weights = (() => { const r = rng(11); const out = []; for (let l = 0; l < 3; l++) { out.push(nodePos[l].map(() => nodePos[l + 1].map(() => r() * 2 - 1))); } return out; })();
+function sceneNetwork(lt, d) {
+  header(3, 'Jaringan Saraf Tiruan', lt);
+  const wave = lt < 2 ? -10 : ((lt - 2) * 1.3) % 4.6 - .3;
+  for (let l = 0; l < 3; l++) {
+    const la = eo(prog(lt, .6 + l * .3, 1.4 + l * .3));
+    nodePos[l].forEach((a, i) => nodePos[l + 1].forEach((b, j) => {
+      const w = weights[l][i][j];
+      x.strokeStyle = w > 0 ? `rgba(56,189,248,${.28 * la})` : `rgba(244,114,182,${.28 * la})`;
+      x.lineWidth = .5 + Math.abs(w) * 2.2;
+      x.beginPath(); x.moveTo(a.x, a.y); x.lineTo(b.x, b.y); x.stroke();
+      const f = wave - l;
+      if (f >= 0 && f <= 1 && Math.abs(w) > .25) {
+        circle(lerp(a.x, b.x, f), lerp(a.y, b.y, f), 2.5 + Math.abs(w) * 2);
+        x.fillStyle = w > 0 ? C.cyan : C.pink; x.fill();
+      }
+    }));
+  }
+  nodePos.forEach((ns, l) => {
+    const a = back(prog(lt, .3 + l * .3, 1 + l * .3));
+    const glow = clamp(1 - Math.abs(wave - l) * 2);
+    ns.forEach(n => {
+      x.save(); x.shadowColor = C.violet; x.shadowBlur = glow * 30;
+      circle(n.x, n.y, 17 * clamp(a, 0, 1.2));
+      x.fillStyle = `rgb(${lerp(49, 196, glow)},${lerp(46, 181, glow)},${lerp(129, 253, glow)})`; x.fill();
+      x.strokeStyle = C.violet; x.lineWidth = 2; x.stroke(); x.restore();
+    });
+  });
+  withAlpha(eo(prog(lt, 1.6, 2.2)), () => {
+    txt('Input', LX[0], 560, 19, C.cyan, 700);
+    txt('Lapisan tersembunyi', (LX[1] + LX[2]) / 2, 560, 19, C.violet, 700);
+    txt('Output', LX[3], 560, 19, C.green, 700);
+    // keterangan bobot
+    x.lineWidth = 3;
+    x.strokeStyle = C.cyan; x.beginPath(); x.moveTo(1080, 178); x.lineTo(1110, 178); x.stroke();
+    txt('bobot +', 1118, 184, 15, C.muted, 600, 'left');
+    x.strokeStyle = C.pink; x.beginPath(); x.moveTo(1080, 202); x.lineTo(1110, 202); x.stroke();
+    txt('bobot −', 1118, 208, 15, C.muted, 600, 'left');
+  });
+  caption('Angka-angka mengalir melewati lapisan "neuron". Setiap sambungan punya bobot yang mengatur seberapa kuat sinyal diteruskan.', lt, 2);
+}
+
+// ---------- Adegan 5: Latihan ----------
+const lossPts = (() => { const r = rng(5); return Array.from({ length: 121 }, (_, i) => { const k = i / 120; return .86 * Math.exp(-3.6 * k) + .06 + (r() - .5) * .09 * (1 - k * .8); }); })();
+function sceneTraining(lt, d) {
+  header(4, 'Belajar dari Kesalahan', lt);
+  const cx = 340, cy = 365, R = 125;
+  const steps = [['Tebak'], ['Cek', 'jawaban'], ['Perbaiki', 'bobot']];
+  const cols = [C.cyan, C.amber, C.green];
+  const angs = [-Math.PI / 2, Math.PI / 6, Math.PI * 5 / 6];
+  const spin = Math.max(0, lt - 1.4) * 2.4;
+  const active = lt > 1.4 ? Math.floor(spin / (Math.PI * 2 / 3) + .5) % 3 : -1;
+  withAlpha(eo(prog(lt, .5, 1.2)), () => {
+    x.strokeStyle = 'rgba(255,255,255,.15)'; x.lineWidth = 3; circle(cx, cy, R); x.stroke();
+    if (lt > 1.4) {
+      const a = -Math.PI / 2 + spin;
+      x.strokeStyle = C.violet; x.lineWidth = 4;
+      x.beginPath(); x.arc(cx, cy, R, a - .7, a); x.stroke();
+      circle(cx + R * Math.cos(a), cy + R * Math.sin(a), 7); x.fillStyle = C.text; x.fill();
+    }
+    steps.forEach((lab, i) => {
+      const px = cx + R * Math.cos(angs[i]), py = cy + R * Math.sin(angs[i]);
+      const on = i === active;
+      x.save(); x.shadowColor = cols[i]; x.shadowBlur = on ? 30 : 0;
+      circle(px, py, 54); x.fillStyle = on ? cols[i] : '#1e2350'; x.fill();
+      x.strokeStyle = cols[i]; x.lineWidth = 3; x.stroke(); x.restore();
+      lab.forEach((l, k) => txt(l, px, py + 6 + (k - (lab.length - 1) / 2) * 20, 17, on ? '#0b1022' : C.text, 700));
+    });
+  });
+  // grafik error
+  const gx = 650, gy = 185, gw = 520, gh = 330;
+  const kp = eio(prog(lt, 1.4, 8.4));
+  withAlpha(eo(prog(lt, .8, 1.5)), () => {
+    x.strokeStyle = 'rgba(255,255,255,.3)'; x.lineWidth = 2;
+    x.beginPath(); x.moveTo(gx, gy); x.lineTo(gx, gy + gh); x.lineTo(gx + gw, gy + gh); x.stroke();
+    txt('Kesalahan (error)', gx + 10, gy + 4, 17, C.pink, 700, 'left');
+    txt('Jumlah latihan →', gx + gw, gy + gh + 30, 17, C.muted, 600, 'right');
+    const n = Math.max(1, Math.floor(kp * 120));
+    x.strokeStyle = C.pink; x.lineWidth = 3; x.lineJoin = 'round';
+    x.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const px = gx + (i / 120) * gw, py = gy + gh - lossPts[i] * (gh - 20);
+      i ? x.lineTo(px, py) : x.moveTo(px, py);
+    }
+    x.stroke();
+    const ex = gx + (n / 120) * gw, ey = gy + gh - lossPts[n] * (gh - 20);
+    x.save(); x.shadowColor = C.pink; x.shadowBlur = 20; circle(ex, ey, 7); x.fillStyle = C.text; x.fill(); x.restore();
+    txt(Math.round(lossPts[n] * 100) + '%', ex + 14, ey - 12, 18, C.text, 800, 'left', MONO);
+    txt('Latihan ke-' + Math.floor(kp * 5000000).toLocaleString('id-ID'), gx + gw, gy + 4, 17, C.amber, 700, 'right', MONO);
+  });
+  caption('Model menebak, membandingkan dengan jawaban yang benar, lalu sedikit memperbaiki bobotnya. Diulang jutaan kali, kesalahannya makin kecil.', lt, 1.6);
+}
+
+// ---------- Adegan 6: Prediksi ----------
+const cands = [['ikan', .72, C.green], ['daging', .14, C.cyan], ['nasi', .09, C.violet], ['batu', .01, C.dim]];
+function scenePredict(lt, d) {
+  header(5, 'Menebak Kata Berikutnya', lt);
+  const prompt = 'Kucing suka makan';
+  x.font = `700 42px ${FONT}`;
+  const pw = x.measureText(prompt + ' ').width;
+  const filled = lt > 6.4;
+  const blankW = 150, totalW = pw + blankW;
+  const px0 = W / 2 - totalW / 2, py = 222;
+  withAlpha(eo(prog(lt, .4, 1.1)), () => {
+    rr(px0 - 30, py - 52, totalW + 60, 76, 18);
+    x.fillStyle = 'rgba(255,255,255,.06)'; x.fill(); x.strokeStyle = 'rgba(255,255,255,.18)'; x.lineWidth = 1.5; x.stroke();
+    txt(prompt, px0, py, 42, C.text, 700, 'left');
+    const bx = px0 + pw;
+    if (!filled) {
+      x.setLineDash([8, 6]); x.strokeStyle = C.amber; x.lineWidth = 2;
+      rr(bx, py - 40, blankW - 10, 52, 10); x.stroke(); x.setLineDash([]);
+      if (Math.floor(lt * 2) % 2 === 0) txt('?', bx + (blankW - 10) / 2, py, 40, C.amber, 800);
+    } else {
+      const a = eo(prog(lt, 6.4, 6.9));
+      x.save(); x.shadowColor = C.green; x.shadowBlur = 25 * (1 - a) + 8;
+      txt('ikan', bx, py, 42, C.green, 800, 'left'); x.restore();
+    }
+  });
+  const by0 = 320, rowH = 58, barX = 520, barMax = 480;
+  cands.forEach(([w, p, col], i) => {
+    const ry = by0 + i * rowH;
+    const a = eo(prog(lt, 1.2 + i * .15, 1.7 + i * .15));
+    const g = eio(prog(lt, 1.8, 3.6));
+    const hl = i === 0 && lt > 4 ? eo(prog(lt, 4, 4.5)) : 0;
+    withAlpha(a * (i > 0 && lt > 4 ? lerp(1, .45, eo(prog(lt, 4, 4.5))) : 1), () => {
+      const flying = i === 0 && lt > 5.2;
+      if (!flying) txt(w, barX - 20, ry + 8, 28, i === 0 && hl ? C.green : C.text, 700, 'right');
+      rr(barX, ry - 16, barMax, 32, 8); x.fillStyle = 'rgba(255,255,255,.06)'; x.fill();
+      x.save(); x.shadowColor = col; x.shadowBlur = hl * 25;
+      rr(barX, ry - 16, Math.max(4, barMax * p * g), 32, 8); x.fillStyle = col; x.fill(); x.restore();
+      txt(Math.round(p * 100 * g) + '%', barX + barMax + 20, ry + 8, 24, col === C.dim ? C.muted : col, 800, 'left', MONO);
+    });
+  });
+  // kata "ikan" terbang ke tempat kosong
+  if (lt > 5.2 && lt <= 6.4) {
+    const f = eio(prog(lt, 5.2, 6.4));
+    x.font = `700 28px ${FONT}`;
+    const sw = x.measureText('ikan').width;
+    const sx = barX - 20 - sw, sy = by0 + 8;
+    const tx = px0 + pw, ty = py;
+    const cxp = lerp(sx, tx, f), cyp = lerp(sy, ty, f) - Math.sin(f * Math.PI) * 60;
+    x.save(); x.shadowColor = C.green; x.shadowBlur = 20;
+    txt('ikan', cxp, cyp, lerp(28, 42, f), C.green, 800, 'left'); x.restore();
+  }
+  withAlpha(eo(prog(lt, 4, 4.6)), () => txt('← paling mungkin', barX + barMax + 92, by0 + 8, 18, C.green, 700, 'left'));
+  caption('Chatbot menulis jawaban kata demi kata: menghitung peluang setiap kata berikutnya, memilih yang paling cocok, lalu mengulanginya.', lt, 1.4);
+}
+
+// ---------- Adegan 7: Penutup ----------
+function sceneOutro(lt, d) {
+  withAlpha(eo(prog(lt, .2, .9)), () => txt('Intinya', W / 2, 170, 44, C.text, 800));
+  const items = [['Data', C.cyan, true], ['+', C.dim], ['Matematika', C.violet, true], ['+', C.dim], ['Latihan', C.amber, true], ['=', C.dim], ['AI', C.green, true]];
+  x.font = `800 34px ${FONT}`;
+  const gap = 22;
+  const widths = items.map(([s, , chip]) => x.measureText(s).width + (chip ? 48 : 0));
+  const total = widths.reduce((a, b) => a + b, 0) + gap * (items.length - 1);
+  let cur = W / 2 - total / 2;
+  items.forEach(([s, col, chip], i) => {
+    const w = widths[i], cxp = cur + w / 2; cur += w + gap;
+    const a = back(prog(lt, .8 + i * .28, 1.3 + i * .28));
+    withAlpha(prog(lt, .8 + i * .28, 1.1 + i * .28), () => {
+      x.save(); x.translate(cxp, 320); x.scale(a, a);
+      if (chip) {
+        x.shadowColor = col; x.shadowBlur = s === 'AI' ? 30 : 0;
+        rr(-w / 2, -40, w, 72, 20); x.fillStyle = col + '2e'; x.fill();
+        x.strokeStyle = col; x.lineWidth = 2.5; x.stroke(); x.shadowBlur = 0;
+      }
+      txt(s, 0, 8, 34, chip ? col : C.muted, 800);
+      x.restore();
+    });
+  });
+  withAlpha(eo(prog(lt, 3.2, 4)), () => {
+    txt('AI tidak berpikir seperti manusia —', W / 2, 455, 28, C.muted, 500);
+    txt('ia sangat pandai mengenali pola.', W / 2, 497, 28, C.text, 700);
+  });
+}
+
+// ---------- Timeline ----------
+const scenes = [
+  { d: 5, f: sceneTitle },
+  { d: 8.5, f: sceneData },
+  { d: 9.5, f: sceneTokens },
+  { d: 10.5, f: sceneNetwork },
+  { d: 10.5, f: sceneTraining },
+  { d: 11, f: scenePredict },
+  { d: 7, f: sceneOutro },
+];
+let acc = 0; for (const s of scenes) { s.start = acc; acc += s.d; }
+const TOTAL = acc;
+
+function render(t) {
+  x.setTransform(1, 0, 0, 1, 0, 0);
+  x.globalAlpha = 1;
+  background(t);
+  for (const s of scenes) {
+    if (t < s.start || t >= s.start + s.d) continue;
+    const lt = t - s.start;
+    const last = s === scenes[scenes.length - 1];
+    const a = Math.min(prog(lt, 0, .5), last ? 1 : 1 - prog(lt, s.d - .5, s.d));
+    x.save(); x.globalAlpha = a; s.f(lt, s.d); x.restore();
+  }
+  // bilah progres
+  x.fillStyle = 'rgba(255,255,255,.08)'; x.fillRect(0, H - 4, W, 4);
+  const g = x.createLinearGradient(0, 0, W, 0); g.addColorStop(0, C.cyan); g.addColorStop(1, C.violet);
+  x.fillStyle = g; x.fillRect(0, H - 4, W * clamp(t / TOTAL), 4);
+  // fade ke hitam di akhir
+  const endFade = prog(t, TOTAL - .8, TOTAL);
+  if (endFade > 0) { x.fillStyle = `rgba(5,7,18,${endFade})`; x.fillRect(0, 0, W, H); }
+}
+window.render = render; window.TOTAL = TOTAL;
+
+// Putar otomatis jika dibuka langsung di browser (bukan saat direkam)
+if (!location.search.includes('record')) {
+  const t0 = performance.now();
+  (function loop(now) { render(((now - t0) / 1000) % TOTAL); requestAnimationFrame(loop); })(t0);
+}
+</script>
+</body>
+</html>
